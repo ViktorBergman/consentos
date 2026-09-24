@@ -26,7 +26,7 @@ services:
         APP_VERSION: ${APP_VERSION:-0.0.0-dev}
     container_name: consentos-api
     env_file: .env
-    expose:
+    ports:
       - 8080
     environment:
       CONSENTOS_DEPLOYMENT: docker-compose
@@ -158,7 +158,7 @@ services:
       dockerfile: apps/admin-ui/Dockerfile
     container_name: consentos-admin
     restart: unless-stopped
-    expose:
+    ports:
       - 80
     deploy:
       resources:
