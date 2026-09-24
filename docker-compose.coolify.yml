@@ -35,6 +35,8 @@ services:
       timeout: 5s
       start_period: 15s
       retries: 3
+    expose:
+      - "8000"
     networks:
       # ``api`` alias matches the dev compose service name so the
       # admin-UI nginx ``proxy_pass http://api:8000`` works unchanged
@@ -156,6 +158,8 @@ services:
       dockerfile: apps/admin-ui/Dockerfile
     container_name: consentos-admin
     restart: unless-stopped
+    expose:
+      - "80"
     deploy:
       resources:
         limits:
