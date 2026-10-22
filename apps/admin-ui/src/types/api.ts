@@ -27,6 +27,8 @@ export interface Site {
   display_name: string;
   is_active: boolean;
   site_group_id: string | null;
+  /** ``null`` until the site's first publish. */
+  live_revision_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -222,7 +224,6 @@ export interface BannerConfig {
   backgroundColour?: string;
   textColour?: string;
   fontFamily?: string;
-  customFontUrl?: string;
   borderRadius?: number;
   /**
    * Preferred banner width in pixels for the overlay (modal) display mode.
@@ -351,33 +352,6 @@ export interface ScanDiff {
   total_changed: number;
 }
 
-// ── Cross-domain consent sync ────────────────────────────────────────
-
-export interface ConsentGroup {
-  id: string;
-  org_id: string;
-  name: string;
-  description: string | null;
-  merge_strategy: 'server_wins' | 'latest_wins';
-  created_at: string;
-  updated_at: string;
-}
-
-export interface ConsentGroupSite {
-  id: string;
-  domain: string;
-  display_name: string;
-}
-
-export interface PublicKey {
-  id: string;
-  org_id: string;
-  name: string;
-  algorithm: 'RS256' | 'ES256';
-  is_active: boolean;
-  created_at: string;
-}
-
 // ── Compliance ──────────────────────────────────────────────────────
 
 export type ComplianceFramework = 'gdpr' | 'cnil' | 'ccpa' | 'eprivacy' | 'lgpd';
@@ -406,348 +380,6 @@ export interface ComplianceCheckResponse {
   overall_score: number;
 }
 
-// ── Analytics ───────────────────────────────────────────────────────
-
-export interface ActionBreakdown {
-  accept_all: number;
-  reject_all: number;
-  custom: number;
-  withdraw: number;
-}
-
-export interface CategoryRate {
-  category: string;
-  accepted: number;
-  rejected: number;
-  rate: number;
-}
-
-export interface ConsentRatesResponse {
-  site_id: string;
-  total_records: number;
-  consent_rate: number;
-  action_breakdown: ActionBreakdown;
-  category_rates: CategoryRate[];
-  from_date: string;
-  to_date: string;
-}
-
-export interface TrendPoint {
-  period: string;
-  total: number;
-  accept_all: number;
-  reject_all: number;
-  custom: number;
-  consent_rate: number;
-}
-
-export interface ConsentTrendsResponse {
-  site_id: string;
-  granularity: 'day' | 'week' | 'month';
-  data: TrendPoint[];
-  from_date: string;
-  to_date: string;
-}
-
-export interface RegionMetric {
-  country_code: string;
-  region_code: string | null;
-  total: number;
-  accept_all: number;
-  reject_all: number;
-  custom: number;
-  consent_rate: number;
-}
-
-export interface RegionalBreakdownResponse {
-  site_id: string;
-  regions: RegionMetric[];
-  from_date: string;
-  to_date: string;
-}
-
-export interface AnalyticsSummaryResponse {
-  site_id: string;
-  total_records: number;
-  consent_rate: number;
-  accept_all_rate: number;
-  reject_all_rate: number;
-  custom_rate: number;
-  top_countries: RegionMetric[];
-  from_date: string;
-  to_date: string;
-}
-
-// ── A/B Testing ─────────────────────────────────────────────────────
-
-export type ABTestStatus = 'draft' | 'running' | 'paused' | 'completed';
-
-export interface ABTestVariant {
-  id: string;
-  ab_test_id: string;
-  name: string;
-  traffic_percentage: number;
-  banner_config_override: Partial<BannerConfig> | null;
-  is_control: boolean;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface ABTest {
-  id: string;
-  site_id: string;
-  created_by: string | null;
-  name: string;
-  description: string | null;
-  status: ABTestStatus;
-  start_date: string | null;
-  end_date: string | null;
-  variants: ABTestVariant[];
-  created_at: string;
-  updated_at: string;
-}
-
-export interface ABTestVariantCreate {
-  name: string;
-  traffic_percentage: number;
-  banner_config_override?: Partial<BannerConfig> | null;
-  is_control: boolean;
-}
-
-export interface ABTestCreate {
-  name: string;
-  description?: string | null;
-  start_date?: string | null;
-  end_date?: string | null;
-  variants: ABTestVariantCreate[];
-}
-
-// ── Preference Centre ──────────────────────────────────────────────
-
-export type PreferenceCategory = 'cookie_consent' | 'communication' | 'data_sharing';
-
-export interface PreferenceType {
-  id: string;
-  site_id: string;
-  name: string;
-  slug: string;
-  description: string | null;
-  category: PreferenceCategory;
-  is_active: boolean;
-  display_order: number;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface PreferenceTypeCreate {
-  name: string;
-  slug: string;
-  description?: string | null;
-  category: PreferenceCategory;
-  is_active?: boolean;
-  display_order?: number;
-}
-
-export interface PreferenceTypeUpdate {
-  name?: string;
-  description?: string | null;
-  category?: PreferenceCategory;
-  is_active?: boolean;
-  display_order?: number;
-}
-
-export interface UserPreferenceRecord {
-  id: string;
-  site_id: string;
-  user_identifier_hash: string;
-  preference_type_id: string;
-  value: 'granted' | 'denied';
-  source: 'banner' | 'preference_centre' | 'api';
-  created_at: string;
-  updated_at: string;
-}
-
-export interface PreferenceCentreConfig {
-  site_id: string;
-  site_name: string;
-  preference_types: PreferenceType[];
-  current_preferences: UserPreferenceRecord[];
-}
-
-export interface PreferenceHistoryEntry {
-  preference_type_name: string;
-  preference_type_slug: string;
-  value: string;
-  source: string;
-  created_at: string;
-}
-
-export interface PreferenceHistoryResponse {
-  site_id: string;
-  user_identifier_hash: string;
-  entries: PreferenceHistoryEntry[];
-}
-
-// ── Policy Documents ──────────────────────────────────────────────
-
-export interface PolicyDocument {
-  id: string;
-  site_id: string;
-  type: 'cookie_policy' | 'privacy_section';
-  content_html: string | null;
-  content_markdown: string | null;
-  template_overrides: PolicyTemplateOverrides | null;
-  generated_at: string | null;
-  published_at: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface PolicyTemplateOverrides {
-  introduction_text?: string | null;
-  additional_sections?: { title: string; content: string }[] | null;
-  language?: string | null;
-}
-
-// ── Compliance Scores (server-side monitoring) ─────────────────────
-
-export interface ComplianceScoreRecord {
-  id: string;
-  site_id: string;
-  framework: string;
-  score: number;
-  status: ComplianceStatus;
-  critical_count: number;
-  warning_count: number;
-  info_count: number;
-  issues: unknown;
-  scanned_at: string;
-  created_at: string;
-}
-
-export interface ComplianceScoreSummary {
-  site_id: string;
-  overall_score: number;
-  frameworks: ComplianceScoreRecord[];
-}
-
-export interface ComplianceScoreTrendPoint {
-  framework: string;
-  score: number;
-  scanned_at: string;
-}
-
-export interface ComplianceScoreTrendResponse {
-  site_id: string;
-  framework: string | null;
-  data_points: ComplianceScoreTrendPoint[];
-}
-
-export interface ValidationIssueResponse {
-  check: string;
-  severity: string;
-  message: string;
-  recommendation: string;
-  details: Record<string, unknown>;
-}
-
-export interface ValidationResultResponse {
-  url: string;
-  pre_consent_issues: ValidationIssueResponse[];
-  post_accept_issues: ValidationIssueResponse[];
-  post_reject_issues: ValidationIssueResponse[];
-  dark_pattern_issues: ValidationIssueResponse[];
-  banner_found: boolean;
-  errors: string[];
-}
-
-export interface ABTestComplianceResult {
-  variant_id: string;
-  variant_name: string;
-  compliant: boolean;
-  issues: {
-    framework: string;
-    severity: string;
-    rule_id: string;
-    message: string;
-    recommendation: string;
-  }[];
-}
-
-// ── DSAR & Retention ────────────────────────────────────────────────
-
-export type DsarIdentifierType = 'email' | 'consent_id' | 'visitor_id';
-export type DsarRequestType = 'access' | 'deletion';
-export type DsarStatus = 'pending' | 'processing' | 'completed' | 'rejected';
-
-export interface DsarRequestResponse {
-  id: string;
-  org_id: string;
-  site_id: string | null;
-  requester_identifier: string;
-  requester_identifier_type: DsarIdentifierType;
-  request_type: DsarRequestType;
-  status: DsarStatus;
-  submitted_at: string;
-  processed_at: string | null;
-  processed_by: string | null;
-  notes: string | null;
-  result_data: Record<string, unknown> | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface RetentionAuditLogResponse {
-  id: string;
-  site_id: string;
-  records_anonymised: number;
-  records_deleted: number;
-  retention_days: number;
-  purge_date: string;
-  created_at: string;
-  updated_at: string;
-}
-
-// ── Consent Receipts ────────────────────────────────────────────────
-
-export interface ConsentReceiptResponse {
-  id: string;
-  consent_record_id: string;
-  site_id: string;
-  receipt_data: {
-    receipt_id: string;
-    version: string;
-    timestamp: string;
-    jurisdiction: { country_code: string | null; region_code: string | null };
-    site: { id: string; domain: string | null; name: string | null };
-    page_url: string | null;
-    banner_version_hash: string;
-    banner_content: {
-      banner_config: Record<string, unknown> | null;
-      translation_strings: Record<string, string> | null;
-    };
-    consent: {
-      action: string;
-      categories_accepted: string[];
-      categories_rejected: string[];
-    };
-    signals: {
-      tc_string: string | null;
-      gpp_string: string | null;
-      gcm_state: Record<string, string> | null;
-      gpc_detected: boolean | null;
-      gpc_honoured: boolean | null;
-    };
-    visitor: {
-      visitor_id: string;
-      ip_hash: string | null;
-      user_agent_hash: string | null;
-    };
-  };
-  banner_version_hash: string | null;
-  created_at: string;
-}
-
 export interface ConsentRecord {
   id: string;
   site_id: string;
@@ -763,6 +395,10 @@ export interface ConsentRecord {
   page_url: string | null;
   country_code: string | null;
   region_code: string | null;
+  /** The published revision the visitor consented against, if recorded. */
+  config_revision_id: string | null;
+  consent_version: string | null;
+  config_revision_number: number | null;
   consented_at: string;
 }
 
@@ -777,4 +413,106 @@ export interface VersionInfo {
   current: string;
   latest: string | null;
   update_available: boolean;
+}
+
+// ── Config revisions ─────────────────────────────────────────────────
+
+export interface RevisionSummary {
+  id: string;
+  number: number;
+  content_hash: string;
+  consent_version: string;
+  requires_reconsent: boolean;
+  note: string | null;
+  published_by: string | null;
+  published_at: string;
+}
+
+export interface RevisionListItem extends RevisionSummary {
+  is_live: boolean;
+  published_by_name: string | null;
+  rolled_back_from_id: string | null;
+  rolled_back_from_number: number | null;
+}
+
+export interface RevisionList {
+  items: RevisionListItem[];
+  total: number;
+}
+
+export type ReconsentReason = 'categories' | 'purposes' | 'vendors';
+
+export interface PublishAttempt {
+  action: 'publish' | 'rollback' | 'bulk_publish';
+  status: 'succeeded' | 'failed';
+  error_code: string | null;
+  error_message: string | null;
+  attempted_at: string;
+  attempted_by_name: string | null;
+  revision_number: number | null;
+}
+
+export interface DraftStatus {
+  live_revision: RevisionSummary | null;
+  content_hash: string;
+  has_unpublished_changes: boolean;
+  changed_sources: { kind: string; id: string }[];
+  reconsent_reasons: ReconsentReason[];
+  last_attempt: PublishAttempt | null;
+}
+
+export interface RevisionDetail extends RevisionListItem {
+  snapshot: Record<string, unknown>;
+  sources: { kind: string; id: string; content_hash: string }[];
+  rollback_reconsent_reasons: ReconsentReason[];
+}
+
+export type ChangeSource = 'site' | 'site_group' | 'organisation' | 'system';
+
+export interface DiffChange {
+  area: 'settings' | 'banner' | 'translations' | 'categories' | 'cookies' | 'other';
+  key: string;
+  before: unknown;
+  after: unknown;
+  source: ChangeSource;
+}
+
+export interface DiffSide {
+  revision_id: string | null;
+  number: number | null;
+  content_hash: string | null;
+}
+
+export interface ConfigDiff {
+  from: DiffSide | null;
+  to: DiffSide;
+  changes: DiffChange[];
+  reconsent_reasons: ReconsentReason[];
+}
+
+export interface AffectedSite {
+  site_id: string;
+  name: string;
+  domain: string;
+  live_number: number;
+  content_hash: string;
+  changed_sources: { kind: string; id: string }[];
+}
+
+export interface BulkPublishResult {
+  site_id: string;
+  status: 'succeeded' | 'failed';
+  revision_number: number | null;
+  error_message: string | null;
+}
+
+export interface BulkPublishResponse {
+  batch_id: string;
+  results: BulkPublishResult[];
+}
+
+export interface PreviewLink {
+  token: string;
+  expires_at: string;
+  url: string;
 }

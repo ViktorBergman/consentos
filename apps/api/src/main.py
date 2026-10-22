@@ -21,6 +21,7 @@ from src.routers import (
     iab_gvl,
     org_config,
     organisations,
+    revisions,
     scanner,
     site_group_config,
     site_groups,
@@ -118,6 +119,7 @@ def create_app() -> FastAPI:
             redis_url=settings.redis_url,
             requests_per_minute=settings.rate_limit_per_minute,
             auth_requests_per_minute=10,
+            trusted_proxies=settings.trusted_proxy_networks,
         )
 
     # CORS
@@ -133,6 +135,7 @@ def create_app() -> FastAPI:
     api_prefix = "/api/v1"
     app.include_router(auth.router, prefix=api_prefix)
     app.include_router(config.router, prefix=api_prefix)
+    app.include_router(revisions.router, prefix=api_prefix)
     app.include_router(consent.router, prefix=api_prefix)
     app.include_router(scanner.router, prefix=api_prefix)
     app.include_router(compliance.router, prefix=api_prefix)
@@ -154,7 +157,7 @@ def create_app() -> FastAPI:
     # Hosted pages (no api_prefix — public pages at /c/<site_id>/cookies)
     app.include_router(hosted_pages.router)
 
-    # Discover and mount enterprise extensions (no-op in CE mode)
+    # Mount anything installed extensions registered
     discover_extensions()
     registry = get_registry()
     registry.apply(app)

@@ -73,6 +73,7 @@ All ConsentOS services read configuration from environment variables (or a `.env
 | `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` | No | `30` | Access token lifetime. |
 | `JWT_REFRESH_TOKEN_EXPIRE_DAYS` | No | `7` | Refresh token lifetime. |
 | `ALLOWED_ORIGINS` | Yes | `http://localhost:5173` | Comma-separated list of origins allowed to call the API. Include the admin UI origin and every customer site that embeds the banner. Wildcards are refused when `ENVIRONMENT` is not dev/test. |
+| `TRUSTED_PROXIES` | Behind a proxy | empty | Comma-separated IPs or CIDRs of reverse proxies / load balancers whose `X-Forwarded-For` and `X-Real-IP` headers are honoured. These headers are ignored unless the direct peer matches an entry. Used for rate limiting, consent record IP pseudonymisation and GeoIP lookups. See [1.5 Reverse proxy](#15-reverse-proxy). |
 
 ### Initial Admin Bootstrap
 
@@ -85,6 +86,8 @@ On first startup, if the `users` table is empty and both credentials below are s
 | `INITIAL_ADMIN_FULL_NAME` | No | `Administrator` | Display name. |
 | `INITIAL_ORG_NAME` | No | `Default Organisation` | Name of the initial organisation. |
 | `INITIAL_ORG_SLUG` | No | `default` | URL slug for the initial organisation. |
+
+The bootstrapped user is also made a [platform admin](#platform-admins).
 
 ### CDN & Banner
 
@@ -120,6 +123,9 @@ ConsentOS resolves visitor location for regional consent modes (e.g. opt-in for 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `SCANNER_SERVICE_URL` | Yes (API) | `http://localhost:8001` | URL the Celery worker uses to reach the scanner service. In Docker Compose this is `http://consentos-scanner:8001`. |
+| `SCANNER_ALLOW_PRIVATE_NETWORKS` | No (scanner) | `false` | By default the scanner only loads pages and resources from public hosts, and skips sitemap URLs outside the site's domains. Set to `true` to scan sites on private, loopback or link-local addresses, such as intranet sites or a local development server. When `true`, a site domain may also include a port, for example `localhost:3000`. |
+
+The scanner checks each host before loading it, but the complete control is at the network level. Give the scanner container outbound rules that deny private (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `100.64.0.0/10`), loopback (`127.0.0.0/8`, `::1`), link-local (`169.254.0.0/16`, `fe80::/10`) and unique local (`fc00::/7`) ranges, and allow only DNS and public ports 80 and 443.
 
 > **Important**: the scanner must NOT share the API's `.env` file via `env_file:`. Variables like `PORT` leak across and rebind the scanner off its default `8001`. Use an explicit `environment:` block instead (the prod compose already does this).
 
@@ -169,6 +175,10 @@ ALLOWED_ORIGINS=https://cmp.example.com,https://www.example.com
 # Initial admin
 INITIAL_ADMIN_EMAIL=admin@example.com
 INITIAL_ADMIN_PASSWORD=<strong temporary password>
+
+# Reverse proxy: trust forwarded client IPs from the host proxy and
+# the admin UI's nginx (both reach the API via the Docker network)
+TRUSTED_PROXIES=127.0.0.1,172.16.0.0/12
 
 # GeoIP — if behind Cloudflare, country detection works automatically.
 # For state/region granularity behind Cloudflare Enterprise:
@@ -266,6 +276,8 @@ server {
 }
 ```
 
+**Forwarded client IPs.** The API only reads `X-Forwarded-For` / `X-Real-IP` when the connecting peer is listed in `TRUSTED_PROXIES`; otherwise it uses the peer address. With the Docker Compose stack, requests from a host proxy arrive via the Docker bridge gateway and requests proxied by the admin UI's nginx come from its container, so set `TRUSTED_PROXIES` to cover your Docker networks (the default bridge pools sit in `172.16.0.0/12`; check with `docker network inspect`). If another proxy or CDN sits in front of this one, add its address ranges too, since `X-Forwarded-For` is walked from the right and the first untrusted hop is taken as the client.
+
 ### 1.6 Integrate the banner
 
 Add the loader to every page on your customer site, **as the very first `<script>` in `<head>`** — no `async`, no `defer`:
@@ -332,6 +344,8 @@ api:
     ALLOWED_ORIGINS: "https://cmp.example.com,https://www.example.com"
     CDN_BASE_URL: "https://cmp.example.com"
     SCANNER_SERVICE_URL: "http://consentos-scanner:8001"
+    # Trust X-Forwarded-For from the ingress controller (your pod CIDR)
+    TRUSTED_PROXIES: "10.0.0.0/8"
     # GeoIP — behind Cloudflare, country resolves automatically.
     # For state-level behind Cloudflare Enterprise:
     # GEOIP_REGION_HEADER: cf-region-code
@@ -388,6 +402,8 @@ secrets:
   jwtSecretKey: "<generate with openssl rand -hex 32>"
   postgresqlPassword: "<your managed DB password>"
 ```
+
+The chart refuses to render while `secrets.jwtSecretKey` is empty or still set to the `CHANGE-ME-in-production` placeholder. Set `secrets.existingSecret` instead to supply the secret yourself.
 
 ### 2.4 Install the chart
 
@@ -675,12 +691,42 @@ Serverless platforms don't have a persistent filesystem for MaxMind databases. Y
 
 ---
 
+## Upgrade Notes
+
+### Configuration changes are published
+
+Saving configuration no longer changes what visitors see. Edits build up in a draft and go live when an owner or admin publishes them, and every publish is kept as a revision that can be rolled back to. See [Publishing configuration](publishing.md).
+
+**What the upgrade does.** Migration `0013` adds the revision tables and publishes v1 for every existing site that has a configuration, built from what it serves today. Each v1 keeps the site's existing configuration ID as its consent version, which is what the banner already compares against, so after the upgrade every site serves the same configuration and no visitor is asked to consent again. Deleted sites are skipped. The migration needs no manual steps and runs with the others on startup. Downgrading removes the new tables and columns and leaves existing data as it was.
+
+**New sites.** A site created after the upgrade has nothing live until its first publish, and `GET /config/sites/{id}/geo-resolved` returns `404` for it. The banner then uses its built-in defaults. Publish new sites before adding the banner to them.
+
+**Caching.** `GET /config/sites/{id}/geo-resolved` now only changes when someone publishes. Responses for a draft preview link are sent with `Cache-Control: no-store`.
+
+### Consent and cookie reports are checked against the site's domains
+
+Consent records and cookie reports are only accepted from the site's domain and its additional domains, including their subdomains. The API checks the request's `Origin` header (or `Referer` when `Origin` is absent or `null`) and, for cookie reports, the reported page URL. Requests from any other domain are rejected with `403`, and each rejection is logged at warning level with the site ID and the rejected host. Consent and cookie reports for inactive sites are rejected with `404`.
+
+If you serve one site on several domains, including storefront or staging domains provided by a hosting platform, add each of them to the site's additional domains **before upgrading**. Otherwise consent from those domains will be rejected. Additional domains are set through the sites API:
+
+```bash
+curl -X PATCH https://cmp.example.com/api/v1/sites/<site-id> \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"additional_domains": ["example.org", "shop.example.net"]}'
+```
+
+Registered domains are compared without scheme, port, path or trailing dot, and internationalised domain names match their punycode form, so `bücher.de` and `xn--bcher-kva.de` are treated as the same domain.
+
+---
+
 ## Banner Integration Checklist
 
 Regardless of deployment method, verify these before going live:
 
 - [ ] `consent-loader.js` is the **very first `<script>` in `<head>`** on every customer page. No `async`. No `defer`.
 - [ ] `data-site-id` and `data-api-base` attributes are set correctly on the script tag.
+- [ ] Every domain that serves the site is listed as its primary domain or one of its additional domains; consent and cookie reports from other domains are rejected.
 - [ ] The API's `ALLOWED_ORIGINS` includes every customer site origin that embeds the banner.
 - [ ] `CDN_BASE_URL` points at the origin where `consent-loader.js` and `consent-bundle.js` are served (same as the admin UI in a standard deployment).
 - [ ] Google Tag Manager (if used) is loaded **after** the ConsentOS loader, not before.
@@ -711,11 +757,33 @@ Once logged back in, you can change your email and password from the **Account**
 
 ---
 
+## Platform Admins
+
+The known cookies database is shared by every organisation on the instance, so changing it is limited to platform admins rather than organisation owners and admins. Everyone who can log in can still read it.
+
+A platform admin is any user with the `is_superuser` flag. The user created by the [initial admin bootstrap](#initial-admin-bootstrap) gets it automatically. To grant it to another user, or to an existing deployment's operator after upgrading:
+
+```bash
+docker exec -it consentos-api python -m src.cli.platform_admin --email ops@example.com
+```
+
+The command shows the matching user and their organisation and asks you to confirm; pass `--yes` to skip the prompt in scripts. Add `--revoke` to remove the flag. It is read on each request, so the change takes effect immediately. It cannot be set through the API or the admin UI; `GET /api/v1/auth/me` reports it as `is_superuser`. On Kubernetes:
+
+```bash
+kubectl exec -it deploy/consentos-api -n consentos -- \
+  python -m src.cli.platform_admin --email ops@example.com
+```
+
+Regex patterns in the known cookies database are checked when saved: they must compile, be at most 255 characters, and must not repeat a group that is itself repeated or contains alternatives (for example `(a+)+` or `(a|aa)+`). Stored patterns that fail these checks are skipped during classification and logged as a warning.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
 | `_ga` cookie appears before consent | The ConsentOS loader isn't the first script on the page, or it's loaded with `async`/`defer`. | Move the loader to the very top of `<head>` and remove `async`/`defer`. |
+| Consent or cookie reports return `403`, with "does not match site" warnings in the API log | The page is served from a domain that is not registered for the site. | Add the domain to the site's `additional_domains` (see [Upgrade Notes](#upgrade-notes)). |
 | CORS error on banner config fetch | The customer site's origin isn't in `ALLOWED_ORIGINS`. | Add the origin to the comma-separated list and redeploy. |
 | Scanner fails with `httpx.ConnectError` | `SCANNER_SERVICE_URL` doesn't match the scanner's actual address/port, or the scanner's port was overridden by a shared `PORT` env var. | Verify the URL and ensure the scanner uses a scoped `environment:` block, not `env_file: .env`. |
 | API refuses to start: "unsafe configuration" | `JWT_SECRET_KEY` is the placeholder value, or `ALLOWED_ORIGINS` contains `*`, and `ENVIRONMENT` is set to `production`. | Set real values for both. |

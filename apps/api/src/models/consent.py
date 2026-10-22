@@ -54,23 +54,21 @@ class ConsentRecord(UUIDPrimaryKeyMixin, Base):
     gpc_detected: Mapped[bool | None] = mapped_column(nullable=True)
     gpc_honoured: Mapped[bool | None] = mapped_column(nullable=True)
 
-    # A/B testing — soft references to EE `ab_tests` / `ab_test_variants`
-    # tables. Intentionally *no* FK constraint so the core schema works
-    # without the EE extension installed.
-    ab_test_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
-        nullable=True,
-        index=True,
-    )
-    ab_variant_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
-        nullable=True,
-    )
-
     # Context
     page_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     country_code: Mapped[str | None] = mapped_column(String(5), nullable=True)
     region_code: Mapped[str | None] = mapped_column(String(10), nullable=True)
+
+    # The published revision the visitor consented against, and its
+    # consent version. Empty for records made before revisions existed,
+    # or when the site hadn't been published.
+    config_revision_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("site_config_revisions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    consent_version: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
 
     # Timestamp
     consented_at: Mapped[datetime] = mapped_column(

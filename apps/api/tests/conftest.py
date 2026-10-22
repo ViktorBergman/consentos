@@ -214,6 +214,69 @@ async def auth_headers(auth_token):
     return {"Authorization": f"Bearer {auth_token}"}
 
 
+@pytest_asyncio.fixture(loop_scope="session")
+async def other_org_headers(_test_engine, _setup_db):
+    """Auth headers for an owner in a second, unrelated organisation."""
+    from src.models.organisation import Organisation
+    from src.models.user import User
+    from src.services.auth import create_access_token, hash_password
+
+    async with AsyncSession(_test_engine, expire_on_commit=False) as session:
+        org = Organisation(
+            id=uuid.uuid4(),
+            name="Other Organisation",
+            slug=f"other-org-{uuid.uuid4().hex[:8]}",
+        )
+        session.add(org)
+        await session.flush()
+        user = User(
+            id=uuid.uuid4(),
+            email=f"other-{uuid.uuid4().hex[:8]}@test.com",
+            password_hash=hash_password("TestPassword123"),
+            full_name="Other Owner",
+            role="owner",
+            organisation_id=org.id,
+        )
+        session.add(user)
+        await session.commit()
+
+    token = create_access_token(
+        user_id=str(user.id),
+        organisation_id=str(org.id),
+        role=user.role,
+        email=user.email,
+    )
+    return {"Authorization": f"Bearer {token}"}
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def superuser_headers(_test_engine, _setup_db, test_org):
+    """HTTP headers for an owner who is also a platform admin."""
+    from src.models.user import User
+    from src.services.auth import create_access_token, hash_password
+
+    async with AsyncSession(_test_engine, expire_on_commit=False) as session:
+        user = User(
+            id=uuid.uuid4(),
+            email=f"platform-{uuid.uuid4().hex[:8]}@test.com",
+            password_hash=hash_password("TestPassword123"),
+            full_name="Platform Admin",
+            role="owner",
+            organisation_id=test_org.id,
+            is_superuser=True,
+        )
+        session.add(user)
+        await session.commit()
+
+    token = create_access_token(
+        user_id=str(user.id),
+        organisation_id=str(user.organisation_id),
+        role=user.role,
+        email=user.email,
+    )
+    return {"Authorization": f"Bearer {token}"}
+
+
 # ── Shared helper for creating sites in integration tests ────────────
 
 
@@ -239,3 +302,16 @@ async def create_test_site(
     )
     assert resp.status_code == 201, f"Failed to create test site: {resp.text}"
     return resp.json()["id"]
+
+
+async def publish_site(client: AsyncClient, headers: dict, site_id: str) -> dict:
+    """Publish a site's current draft via the API and return the revision."""
+    draft = await client.get(f"/api/v1/config/sites/{site_id}/draft", headers=headers)
+    assert draft.status_code == 200, draft.text
+    resp = await client.post(
+        f"/api/v1/config/sites/{site_id}/publish",
+        headers=headers,
+        json={"expected_content_hash": draft.json()["content_hash"]},
+    )
+    assert resp.status_code == 200, f"Failed to publish test site: {resp.text}"
+    return resp.json()

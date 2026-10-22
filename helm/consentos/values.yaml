@@ -18,6 +18,9 @@ api:
     LOG_LEVEL: INFO
     RATE_LIMIT_ENABLED: "true"
     RATE_LIMIT_PER_MINUTE: "120"
+    # IPs/CIDRs of the ingress controller or load balancer whose
+    # X-Forwarded-For headers are trusted (e.g. the cluster pod CIDR).
+    TRUSTED_PROXIES: ""
     CONSENTOS_DEPLOYMENT: helm
   service:
     type: ClusterIP
@@ -124,6 +127,7 @@ secrets:
   # Provide an existing secret name, or leave empty to create one
   existingSecret: ""
   # Values used when creating the secret (ignored if existingSecret is set)
+  # jwtSecretKey must be replaced; the chart will not render with this placeholder.
   jwtSecretKey: "CHANGE-ME-in-production"
   postgresqlPassword: "consentos"
 

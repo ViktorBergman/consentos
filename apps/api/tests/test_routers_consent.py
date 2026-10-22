@@ -1,13 +1,16 @@
 """Unit tests for consent router — mocked database."""
 
+import logging
 import uuid
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from src.config.settings import Settings
 from src.main import create_app
+from src.services.pseudonymisation import pseudonymise
 
 
 def _mock_consent_record(**overrides):
@@ -29,8 +32,31 @@ def _mock_consent_record(**overrides):
     record.page_url = overrides.get("page_url")
     record.country_code = overrides.get("country_code")
     record.region_code = overrides.get("region_code")
+    record.config_revision_id = overrides.get("config_revision_id")
+    record.consent_version = overrides.get("consent_version")
     record.consented_at = overrides.get("consented_at", datetime.now(UTC))
     return record
+
+
+def _mock_site(domain="example.com", additional_domains=None):
+    """Build a mock Site ORM object."""
+    site = MagicMock()
+    site.id = uuid.uuid4()
+    site.domain = domain
+    site.additional_domains = additional_domains
+    return site
+
+
+def _consent_body(**overrides):
+    body = {
+        "site_id": str(uuid.uuid4()),
+        "visitor_id": "visitor-123",
+        "action": "accept_all",
+        "categories_accepted": ["necessary"],
+        "categories_rejected": [],
+    }
+    body.update(overrides)
+    return body
 
 
 def _mock_db(scalar_one_or_none=None):
@@ -94,7 +120,7 @@ async def _client(app, mock_session):
 class TestRecordConsent:
     @pytest.mark.asyncio
     async def test_record_consent_success(self, mock_app):
-        db = _mock_db()
+        db = _mock_db(scalar_one_or_none=_mock_site())
         async with await _client(mock_app, db) as client:
             resp = await client.post(
                 "/api/v1/consent/",
@@ -109,8 +135,35 @@ class TestRecordConsent:
         assert resp.status_code == 201
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("trusted", "expected_ip"),
+        [("", "127.0.0.1"), ("127.0.0.1", "1.2.3.4")],
+    )
+    async def test_record_consent_ip_hash_uses_resolved_client_ip(
+        self, mock_app, trusted, expected_ip
+    ):
+        db = _mock_db(scalar_one_or_none=_mock_site())
+        settings = Settings(trusted_proxies=trusted)
+        with patch("src.services.client_ip.get_settings", return_value=settings):
+            async with await _client(mock_app, db) as client:
+                resp = await client.post(
+                    "/api/v1/consent/",
+                    headers={"x-forwarded-for": "1.2.3.4"},
+                    json={
+                        "site_id": str(uuid.uuid4()),
+                        "visitor_id": "visitor-123",
+                        "action": "accept_all",
+                        "categories_accepted": ["necessary"],
+                        "categories_rejected": [],
+                    },
+                )
+        assert resp.status_code == 201
+        record = db.add.call_args.args[0]
+        assert record.ip_hash == pseudonymise(expected_ip)
+
+    @pytest.mark.asyncio
     async def test_record_consent_reject_all(self, mock_app):
-        db = _mock_db()
+        db = _mock_db(scalar_one_or_none=_mock_site())
         async with await _client(mock_app, db) as client:
             resp = await client.post(
                 "/api/v1/consent/",
@@ -126,7 +179,7 @@ class TestRecordConsent:
 
     @pytest.mark.asyncio
     async def test_record_consent_custom(self, mock_app):
-        db = _mock_db()
+        db = _mock_db(scalar_one_or_none=_mock_site())
         async with await _client(mock_app, db) as client:
             resp = await client.post(
                 "/api/v1/consent/",
@@ -142,7 +195,7 @@ class TestRecordConsent:
 
     @pytest.mark.asyncio
     async def test_record_consent_invalid_action(self, mock_app):
-        db = _mock_db()
+        db = _mock_db(scalar_one_or_none=_mock_site())
         async with await _client(mock_app, db) as client:
             resp = await client.post(
                 "/api/v1/consent/",
@@ -158,7 +211,7 @@ class TestRecordConsent:
 
     @pytest.mark.asyncio
     async def test_record_consent_empty_visitor_id(self, mock_app):
-        db = _mock_db()
+        db = _mock_db(scalar_one_or_none=_mock_site())
         async with await _client(mock_app, db) as client:
             resp = await client.post(
                 "/api/v1/consent/",
@@ -174,7 +227,7 @@ class TestRecordConsent:
 
     @pytest.mark.asyncio
     async def test_record_consent_with_optional_fields(self, mock_app):
-        db = _mock_db()
+        db = _mock_db(scalar_one_or_none=_mock_site())
         async with await _client(mock_app, db) as client:
             resp = await client.post(
                 "/api/v1/consent/",
@@ -192,6 +245,82 @@ class TestRecordConsent:
                 },
             )
         assert resp.status_code == 201
+
+    @pytest.mark.asyncio
+    async def test_record_consent_unknown_site_returns_404(self, mock_app):
+        db = _mock_db(scalar_one_or_none=None)
+        async with await _client(mock_app, db) as client:
+            resp = await client.post("/api/v1/consent/", json=_consent_body())
+        assert resp.status_code == 404
+        db.add.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "headers",
+        [
+            {"origin": "https://other.test"},
+            {"origin": "https://example.com.other.test"},
+            {"origin": "null", "referer": "https://other.test/page"},
+            {"referer": "https://other.test/page"},
+        ],
+    )
+    async def test_record_consent_mismatched_origin_returns_403(self, mock_app, headers):
+        db = _mock_db(scalar_one_or_none=_mock_site())
+        async with await _client(mock_app, db) as client:
+            resp = await client.post("/api/v1/consent/", headers=headers, json=_consent_body())
+        assert resp.status_code == 403
+        db.add.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "headers",
+        [
+            {"origin": "https://example.com"},
+            {"origin": "https://shop.example.com:8443"},
+            {"origin": "https://www.example.com"},
+            {"origin": "https://example.org"},
+            {"referer": "https://blog.example.org/post?id=1"},
+            {"origin": "https://example.com", "referer": "https://other.test/"},
+            {"origin": "null"},
+            {"origin": "null", "referer": "https://example.com/page"},
+        ],
+    )
+    async def test_record_consent_matching_origin_accepted(self, mock_app, headers):
+        db = _mock_db(scalar_one_or_none=_mock_site(additional_domains=["example.org"]))
+        async with await _client(mock_app, db) as client:
+            resp = await client.post("/api/v1/consent/", headers=headers, json=_consent_body())
+        assert resp.status_code == 201
+
+    @pytest.mark.asyncio
+    async def test_record_consent_origin_preferred_over_referer(self, mock_app):
+        db = _mock_db(scalar_one_or_none=_mock_site())
+        async with await _client(mock_app, db) as client:
+            resp = await client.post(
+                "/api/v1/consent/",
+                headers={"origin": "https://other.test", "referer": "https://example.com/"},
+                json=_consent_body(),
+            )
+        assert resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_record_consent_rejection_logged(self, mock_app, caplog):
+        site = _mock_site()
+        db = _mock_db(scalar_one_or_none=site)
+        with caplog.at_level(logging.WARNING, logger="src.services.site_domains"):
+            async with await _client(mock_app, db) as client:
+                resp = await client.post(
+                    "/api/v1/consent/",
+                    headers={"origin": "https://other.test"},
+                    json=_consent_body(visitor_id="visitor-secret"),
+                )
+        assert resp.status_code == 403
+        [record] = [r for r in caplog.records if r.name == "src.services.site_domains"]
+        assert record.levelno == logging.WARNING
+        message = record.getMessage()
+        assert str(site.id) in message
+        assert "other.test" in message
+        assert "visitor-secret" not in message
+        assert "127.0.0.1" not in message
 
 
 class TestGetConsent:

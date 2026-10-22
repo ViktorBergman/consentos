@@ -94,6 +94,8 @@ make up
 make seed
 ```
 
+Adding, editing or deleting entries through the API is limited to platform admins. See [Platform Admins](docs/deployment-guide.md#platform-admins) for how to grant the flag.
+
 You can now log in at `http://localhost:5173` with the credentials you set above.
 
 | Service   | URL                        |
@@ -101,7 +103,11 @@ You can now log in at `http://localhost:5173` with the credentials you set above
 | API docs  | http://localhost:8000/docs |
 | Admin UI  | http://localhost:5173      |
 
-The admin UI dog-foods the banner script at `http://localhost:5173/banner/consent-loader.js`. In production you'd publish those files to a CDN and point `CDN_BASE_URL` at it.
+The admin UI also serves the banner scripts (`consent-loader.js` and `consent-bundle.js`). In production you'd publish those files to a CDN and point `CDN_BASE_URL` at it.
+
+To hold back your own third-party scripts until the visitor consents, tag them with `type="text/plain" data-category="..."`. See [docs/script-blocking.md](docs/script-blocking.md).
+
+Configuration changes go live when you publish them, and each publish is kept so you can roll back. See [docs/publishing.md](docs/publishing.md).
 
 ### Upgrading from PostgreSQL 16
 

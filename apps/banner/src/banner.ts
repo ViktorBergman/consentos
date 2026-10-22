@@ -4,9 +4,6 @@
  * Loaded async by consent-loader.js when no existing consent is found.
  * Fetches site config, renders the banner, handles user interaction,
  * records consent via the API.
- *
- * Enterprise features (A/B testing, GPP, GPC, profile sync, Shopify,
- * re-consent) are loaded via the EE banner extension module when present.
  */
 
 import { announce, createLiveRegion, focusFirst, onEscape, prefersReducedMotion, trapFocus } from './a11y';
@@ -22,6 +19,10 @@ import { isImplicitConsentMode } from './blocking-mode';
 import { buildConsentState, readConsent, writeConsent, writeTcfCookie } from './consent';
 import { renderCookiesWidget } from './cookies-widget';
 import { buildGcmStateFromCategories, updateGcm } from './gcm';
+import { type GpcResult, evaluateGpc, getVisitorRegion } from './gpc';
+import { installGppApi, isGppApiInstalled, setGppDisplayStatus, updateGppConsent } from './gpp-api';
+import { buildGppFromConsent } from './gpp-consent';
+import { escapeHtml, isValidColour, isValidFontFamily } from './html';
 import { type TranslationStrings, DEFAULT_TRANSLATIONS, detectLocale, interpolate, renderLinks, selectTranslations } from './i18n';
 import {
   createTCModel,
@@ -29,6 +30,9 @@ import {
   setTcfDisplayStatus,
   updateTcfConsent,
 } from './tcf';
+import { needsReconsent } from './reconsent';
+import { updateShopifyConsent } from './shopify';
+import { fetchSiteConfig } from './site-config';
 import type { TCModel } from './tcf';
 import type { BannerConfig, ButtonConfig, CategorySlug, ConsentState, SiteConfig } from './types';
 
@@ -62,68 +66,6 @@ export function updateAcceptedCategories(accepted: CategorySlug[]): void {
  * single entry point keeps the behaviour consistent.
  */
 let _openPreferences: (() => void) | null = null;
-
-// -- EE extension hooks (no-ops in CE mode) ---------------------------------
-
-/** Result from the A/B test assignment. */
-interface ABAssignment {
-  abTestId: string;
-  variantId: string;
-  variant: { name: string };
-}
-
-/** Result from GPC evaluation. */
-interface GpcResult {
-  detected: boolean;
-  honoured: boolean;
-}
-
-/** EE hooks that enterprise code can override at runtime. */
-interface EEHooks {
-  applyABTest: (config: SiteConfig, visitorId: string) => { config: SiteConfig; assignment: ABAssignment | null };
-  needsReconsent: (consent: unknown, config: SiteConfig) => { required: boolean; reasons: string[] };
-  evaluateGpc: (config: SiteConfig, region: string | null) => GpcResult;
-  getVisitorRegion: () => string | null;
-  installGppApi: (cmpId: number, supportedApis: string[]) => void;
-  setGppDisplayStatus: (status: string) => void;
-  isGppApiInstalled: () => boolean;
-  updateGppConsent: (gpp: unknown) => string | undefined;
-  buildGppFromConsent: ((accepted: CategorySlug[], config: SiteConfig) => unknown) | null;
-  identifyUser: (jwt: string, config: SiteConfig) => Promise<string[]>;
-  clearIdentity: () => void;
-  isIdentified: () => boolean;
-  pushConsentToServer: (accepted: CategorySlug[], rejected: CategorySlug[], tc?: string, gpp?: string, gcm?: Record<string, string>) => void;
-  updateShopifyConsent: (accepted: CategorySlug[]) => void;
-}
-
-/** Default no-op hooks for CE mode. */
-const _hooks: EEHooks = {
-  applyABTest: (config) => ({ config, assignment: null }),
-  needsReconsent: () => ({ required: false, reasons: [] }),
-  evaluateGpc: () => ({ detected: false, honoured: false }),
-  getVisitorRegion: () => null,
-  installGppApi: () => {},
-  setGppDisplayStatus: () => {},
-  isGppApiInstalled: () => false,
-  updateGppConsent: () => undefined,
-  buildGppFromConsent: null,
-  identifyUser: async () => [],
-  clearIdentity: () => {},
-  isIdentified: () => false,
-  pushConsentToServer: () => {},
-  updateShopifyConsent: () => {},
-};
-
-/**
- * Register EE hooks. Called by the EE banner extension module.
- * Exposed on `window.__consentos_hooks` for the EE bundle to call.
- */
-export function registerEEHooks(hooks: Partial<EEHooks>): void {
-  Object.assign(_hooks, hooks);
-}
-
-// Expose for EE bundle
-(window as any).__consentos_register_ee = registerEEHooks;
 
 /**
  * Every known category, in canonical display order. Used as the
@@ -224,29 +166,12 @@ async function init(): Promise<void> {
   // visitor's translation rather than every locale the site has.
   const locale = detectLocale();
 
-  // Fetch site config — declared with let as A/B testing may replace it
-  let config: SiteConfig;
-  try {
-    const resp = await fetch(
-      `${apiBase}/api/v1/config/sites/${siteId}/geo-resolved?locale=${encodeURIComponent(locale)}`,
-    );
-    if (!resp.ok) throw new Error(`Config fetch failed: ${resp.status}`);
-    config = await resp.json();
-  } catch (err) {
-    console.error('[ConsentOS] Failed to load site config:', err);
-    config = buildDefaultConfig(siteId);
-  }
+  const config = await fetchSiteConfig(apiBase, siteId, locale, () =>
+    buildDefaultConfig(siteId),
+  );
 
-  // Apply A/B test variant assignment (modifies banner_config if applicable)
-  const existingConsent = readConsent();
-  const visitorId = existingConsent?.visitorId ?? crypto.randomUUID?.() ?? String(Date.now());
-  const abResult = _hooks.applyABTest(config, visitorId);
-  config = abResult.config;
-  const abAssignment = abResult.assignment;
-
-  if (abAssignment) {
-    console.info(`[ConsentOS] A/B test assigned: variant "${abAssignment.variant.name}"`);
-  }
+  // A preview shows the banner as a new visitor would see it.
+  const existingConsent = config.preview ? null : readConsent();
 
   // Check if existing consent needs re-consent. We still load
   // translations and install the floating button even when no banner
@@ -255,7 +180,7 @@ async function init(): Promise<void> {
   // giving consent).
   let reconsentRequired = false;
   if (existingConsent) {
-    const reconsent = _hooks.needsReconsent(existingConsent, config);
+    const reconsent = needsReconsent(existingConsent, config);
     reconsentRequired = reconsent.required;
     if (reconsent.required) {
       console.info('[ConsentOS] Re-consent required:', reconsent.reasons.join(', '));
@@ -264,8 +189,8 @@ async function init(): Promise<void> {
 
   // Install GPP API if enabled
   if (config.gpp_enabled) {
-    _hooks.installGppApi(0, config.gpp_supported_apis ?? []);
-    _hooks.setGppDisplayStatus('visible');
+    installGppApi(0, config.gpp_supported_apis ?? []);
+    setGppDisplayStatus('visible');
   }
 
   // Install __tcfapi (locator iframe + postMessage proxy + global)
@@ -276,9 +201,9 @@ async function init(): Promise<void> {
     installTcfApi(PLACEHOLDER_CMP_ID, CMP_VERSION);
   }
 
-  // Evaluate GPC signal
-  const visitorRegion = _hooks.getVisitorRegion();
-  const gpcResult = _hooks.evaluateGpc(config, visitorRegion);
+  // Evaluate GPC signal against the region the API resolved for this visitor
+  const visitorRegion = config.detected_region ?? getVisitorRegion();
+  const gpcResult = evaluateGpc(config, visitorRegion);
 
   if (gpcResult.detected) {
     console.info(`[ConsentOS] GPC signal detected (honoured: ${gpcResult.honoured})`);
@@ -287,7 +212,7 @@ async function init(): Promise<void> {
   // Merge the locale strings returned with the config over the defaults.
   const t = selectTranslations(config.translations, locale);
 
-  installCmpApi(config, t, gpcResult, abAssignment);
+  installCmpApi(config, t, gpcResult);
 
   if (document.querySelector('[data-consentos-cookies]')) {
     window.ConsentOS.renderCookies();
@@ -305,7 +230,6 @@ async function init(): Promise<void> {
       config,
       t,
       gpcResult,
-      abAssignment,
       {
         prefillCategories: current?.accepted ?? null,
         showCategoriesInitially: true,
@@ -339,7 +263,6 @@ async function init(): Promise<void> {
       config,
       t,
       gpcResult,
-      abAssignment,
       {
         prefillCategories: enabled,
         showCategoriesInitially: false,
@@ -353,7 +276,7 @@ async function init(): Promise<void> {
   // there's no local consent, try the iframe bridge before showing
   // the banner. The bridge reads a shared cookie on the API domain
   // that may have been written by another site in the same group.
-  if (!existingConsent && config.consent_group_id) {
+  if (!existingConsent && config.consent_group_id && !config.preview) {
     const bridgeOrigin = config.consent_bridge_url ?? apiBase;
     const bridgeConsent = await tryConsentBridge(bridgeOrigin, config.consent_group_id);
     if (bridgeConsent) {
@@ -364,7 +287,9 @@ async function init(): Promise<void> {
       if (config.gcm_enabled) {
         updateGcm(gcmState);
       }
-      writeConsent(bridgeConsent, config.consent_expiry_days);
+      // Stamp this site's config version, or re-consent would treat the
+      // other site's version as a change and show the banner again.
+      writeConsent({ ...bridgeConsent, configVersion: config.id }, config.consent_expiry_days);
       dispatchConsentEvent(bridgeConsent.accepted);
       showPreferencesButton(config, t);
       return;
@@ -372,21 +297,16 @@ async function init(): Promise<void> {
   }
 
   // First-visit or re-consent: render the banner itself.
-  renderBanner(config, t, gpcResult, abAssignment);
+  renderBanner(config, t, gpcResult);
 }
 
 /**
  * Install the real window.ConsentOS API, replacing the loader stubs.
- *
- * `identifyUser(jwt)` syncs consent with the server. If the server profile
- * fully covers all categories, the banner is suppressed. If categories are
- * missing, only those categories need consent from the user.
  */
 function installCmpApi(
   config: SiteConfig,
   t: TranslationStrings,
   gpcResult?: GpcResult,
-  abAssignment?: ABAssignment | null,
 ): void {
   const enabled = resolveEnabledCategories(config);
   const nonEssential = nonEssentialFor(enabled);
@@ -438,12 +358,6 @@ function installCmpApi(
     isCategoryAccepted: (category: string): boolean => {
       return ((readConsent()?.accepted ?? ['necessary']) as string[]).includes(category);
     },
-    identifyUser: async (jwt: string): Promise<string[]> => {
-      return _hooks.identifyUser(jwt, config);
-    },
-    clearIdentity: (): void => {
-      _hooks.clearIdentity();
-    },
     renderCookies: async (target?: string | HTMLElement): Promise<void> => {
       const { siteId, apiBase } = window.__consentos;
       const current = (readConsent()?.accepted ?? ['necessary']) as CategorySlug[];
@@ -454,7 +368,7 @@ function installCmpApi(
         t,
         currentAccepted: current,
         onSave: (accepted, rejected) => {
-          handleConsent(accepted, rejected, config, gpcResult, abAssignment, t);
+          handleConsent(accepted, rejected, config, gpcResult, t);
         },
       });
     },
@@ -482,7 +396,6 @@ function buildDefaultConfig(siteId: string): SiteConfig {
     terms_url: null,
     consent_expiry_days: 365,
     consent_group_id: null,
-    ab_test: null,
     initiator_map: null,
     enabled_categories: [...ALL_CATEGORIES],
   };
@@ -518,7 +431,6 @@ export function renderBanner(
   config: SiteConfig,
   t: TranslationStrings,
   gpcResult?: GpcResult,
-  abAssignment?: ABAssignment | null,
   openOptions?: OpenOptions,
   trigger: BannerShownTrigger = 'initial',
 ): void {
@@ -539,35 +451,37 @@ export function renderBanner(
   const nonEssential = nonEssentialFor(enabledCategories);
 
   shadow.innerHTML = `
-    <style>${getBannerStyles(config)}</style>
+    <style></style>
     <div class="cmp-overlay-bg"></div>
-    <div class="consentos-banner" role="dialog" aria-label="${t.title}" aria-labelledby="${titleId}" aria-describedby="${descId}" aria-modal="true">
+    <div class="consentos-banner" role="dialog" aria-label="${escapeHtml(t.title)}" aria-labelledby="${titleId}" aria-describedby="${descId}" aria-modal="true">
       <div class="consentos-banner__content">
         ${renderLogo(config)}
         <div class="consentos-banner__text">
-          <p class="consentos-banner__title" id="${titleId}">${t.title}</p>
+          <p class="consentos-banner__title" id="${titleId}">${escapeHtml(t.title)}</p>
           <p class="consentos-banner__description" id="${descId}">
             ${renderDescription(t.description, config)}
           </p>
         </div>
         ${renderCookieCount(config, t)}
-        <div class="consentos-banner__categories" id="consentos-categories" role="group" aria-label="${t.managePreferences}">
+        <div class="consentos-banner__categories" id="consentos-categories" role="group" aria-label="${escapeHtml(t.managePreferences)}">
           ${renderCategories(t, enabledCategories)}
         </div>
         <div class="consentos-banner__actions" role="group" aria-label="Consent actions">
           <button class="cmp-btn cmp-btn--secondary" data-action="reject" type="button">
-            ${t.rejectAll}
+            ${escapeHtml(t.rejectAll)}
           </button>
           <button class="cmp-btn cmp-btn--secondary" data-action="settings" type="button" aria-expanded="false" aria-controls="consentos-categories">
-            ${t.managePreferences}
+            ${escapeHtml(t.managePreferences)}
           </button>
           <button class="cmp-btn cmp-btn--primary" data-action="accept" type="button">
-            ${t.acceptAll}
+            ${escapeHtml(t.acceptAll)}
           </button>
         </div>
       </div>
     </div>
   `;
+
+  (shadow.querySelector('style') as HTMLStyleElement).textContent = getBannerStyles(config);
 
   // Attach event listeners
   const banner = shadow.querySelector('.consentos-banner') as HTMLElement;
@@ -605,7 +519,7 @@ export function renderBanner(
   const dismissRejected: CategorySlug[] = implicit ? [] : nonEssential;
 
   const cleanupEscape = onEscape(banner, () => {
-    handleConsent(dismissAccepted, dismissRejected, config, gpcResult, abAssignment, t);
+    handleConsent(dismissAccepted, dismissRejected, config, gpcResult, t);
     removeBanner(host, 'dismissed', cleanupFocusTrap, cleanupEscape);
     showPreferencesButton(config, t);
   });
@@ -616,11 +530,11 @@ export function renderBanner(
       if (action === 'accept') {
         // Explicit Accept All overrides GPC — user choice takes precedence.
         // "All" only includes the categories the operator has enabled.
-        handleConsent([...enabledCategories], [], config, gpcResult, abAssignment, t);
+        handleConsent([...enabledCategories], [], config, gpcResult, t);
         removeBanner(host, 'accept-all', cleanupFocusTrap, cleanupEscape);
         showPreferencesButton(config, t);
       } else if (action === 'reject') {
-        handleConsent(['necessary'], nonEssential, config, gpcResult, abAssignment, t);
+        handleConsent(['necessary'], nonEssential, config, gpcResult, t);
         removeBanner(host, 'reject-all', cleanupFocusTrap, cleanupEscape);
         showPreferencesButton(config, t);
       } else if (action === 'settings') {
@@ -631,7 +545,7 @@ export function renderBanner(
       } else if (action === 'save') {
         const accepted = getSelectedCategories(shadow);
         const rejected = nonEssential.filter((c) => !accepted.includes(c));
-        handleConsent(accepted, rejected, config, gpcResult, abAssignment, t);
+        handleConsent(accepted, rejected, config, gpcResult, t);
         removeBanner(host, 'save-preferences', cleanupFocusTrap, cleanupEscape);
         showPreferencesButton(config, t);
       }
@@ -668,8 +582,8 @@ function renderCategories(t: TranslationStrings, enabled: CategorySlug[]): strin
         (cat) => `
       <label class="cmp-category">
         <div class="cmp-category__info">
-          <span class="cmp-category__name" id="cmp-cat-${cat.slug}">${cat.name}</span>
-          <span class="cmp-category__desc" id="cmp-cat-${cat.slug}-desc">${cat.desc}</span>
+          <span class="cmp-category__name" id="cmp-cat-${cat.slug}">${escapeHtml(cat.name)}</span>
+          <span class="cmp-category__desc" id="cmp-cat-${cat.slug}-desc">${escapeHtml(cat.desc)}</span>
         </div>
         <input type="checkbox" data-category="${cat.slug}"
           aria-labelledby="cmp-cat-${cat.slug}"
@@ -681,7 +595,7 @@ function renderCategories(t: TranslationStrings, enabled: CategorySlug[]): strin
       )
       .join('') +
     `<button class="cmp-btn cmp-btn--primary cmp-btn--save" data-action="save" type="button">
-      ${t.savePreferences}
+      ${escapeHtml(t.savePreferences)}
     </button>`
   );
 }
@@ -703,7 +617,6 @@ function handleConsent(
   rejected: CategorySlug[],
   config: SiteConfig,
   gpcResult?: GpcResult,
-  abAssignment?: ABAssignment | null,
   t?: TranslationStrings,
 ): void {
   const existing = readConsent();
@@ -711,10 +624,10 @@ function handleConsent(
 
   // Generate GPP string if GPP is enabled
   let gppString: string | undefined;
-  if (config.gpp_enabled && _hooks.isGppApiInstalled() && _hooks.buildGppFromConsent) {
-    const gpp = _hooks.buildGppFromConsent(accepted, config);
-    gppString = _hooks.updateGppConsent(gpp);
-    _hooks.setGppDisplayStatus('hidden');
+  if (config.gpp_enabled && isGppApiInstalled()) {
+    const gpp = buildGppFromConsent(accepted, config.gpp_supported_apis ?? [], gpcResult?.detected ?? false);
+    gppString = updateGppConsent(gpp);
+    setGppDisplayStatus('hidden');
   }
 
   // Generate TCF v2.3 TC string + emit ``useractioncomplete`` event
@@ -738,18 +651,22 @@ function handleConsent(
     gpcResult?.honoured,
   );
 
-  // Write first-party cookie + the IAB-standard euconsent-v2 cookie
-  // when TCF is enabled (vendors that don't use postMessage read it
-  // directly from document.cookie).
-  writeConsent(state, config.consent_expiry_days);
-  if (tcString) {
-    writeTcfCookie(tcString, config.consent_expiry_days);
-  }
+  // A preview applies the choice to this page only: nothing is stored,
+  // shared or recorded, so the holder's real consent is left alone.
+  if (!config.preview) {
+    // Write first-party cookie + the IAB-standard euconsent-v2 cookie
+    // when TCF is enabled (vendors that don't use postMessage read it
+    // directly from document.cookie).
+    writeConsent(state, config.consent_expiry_days);
+    if (tcString) {
+      writeTcfCookie(tcString, config.consent_expiry_days);
+    }
 
-  // Push consent to the cross-domain bridge iframe so other sites
-  // in the same group pick it up on their next load.
-  if (config.consent_group_id) {
-    storeConsentInBridge(state, config.consent_expiry_days);
+    // Push consent to the cross-domain bridge iframe so other sites
+    // in the same group pick it up on their next load.
+    if (config.consent_group_id) {
+      storeConsentInBridge(state, config.consent_expiry_days);
+    }
   }
 
   // Release blocked scripts for accepted categories
@@ -761,33 +678,32 @@ function handleConsent(
   }
 
   // Update Shopify Customer Privacy API
-  if (config.shopify_privacy_enabled) {
-    _hooks.updateShopifyConsent(accepted);
+  if (config.shopify_privacy_enabled && !config.preview) {
+    updateShopifyConsent(accepted);
   }
 
   // Post consent to API (fire and forget)
   const { siteId, apiBase } = window.__consentos;
-  fetch(`${apiBase}/api/v1/consent/`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      site_id: siteId,
-      visitor_id: state.visitorId,
-      action: determineAction(accepted, rejected),
-      categories_accepted: accepted,
-      categories_rejected: rejected,
-      gcm_state: gcmState,
-      gpc_detected: gpcResult?.detected ?? false,
-      gpc_honoured: gpcResult?.honoured ?? false,
-      page_url: window.location.href,
-      ab_test_id: abAssignment?.abTestId ?? null,
-      ab_variant_id: abAssignment?.variantId ?? null,
-    }),
-  }).catch((err) => console.warn('[ConsentOS] Failed to record consent:', err));
-
-  // Push to server if user is identified (non-blocking background sync)
-  if (_hooks.isIdentified()) {
-    _hooks.pushConsentToServer(accepted, rejected, undefined, gppString, gcmState);
+  if (!config.preview) {
+    fetch(`${apiBase}/api/v1/consent/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        site_id: siteId,
+        visitor_id: state.visitorId,
+        action: determineAction(accepted, rejected),
+        categories_accepted: accepted,
+        categories_rejected: rejected,
+        gcm_state: gcmState,
+        gpc_detected: gpcResult?.detected ?? false,
+        gpc_honoured: gpcResult?.honoured ?? false,
+        gpp_string: gppString ?? null,
+        page_url: window.location.href,
+        // The published revision the visitor consented against; empty
+        // while the site isn't published yet.
+        config_revision_id: config.revision_id ?? null,
+      }),
+    }).catch((err) => console.warn('[ConsentOS] Failed to record consent:', err));
   }
 
   // Dispatch event
@@ -825,11 +741,7 @@ export function renderLogo(config: SiteConfig): string {
   if (!banner?.showLogo || !banner.logoUrl) {
     return '';
   }
-  const safeUrl = banner.logoUrl
-    .replace(/&/g, '&amp;')
-    .replace(/"/g, '&quot;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+  const safeUrl = escapeHtml(banner.logoUrl);
   const height = clampLogoHeight(banner.logoHeight);
   return `<img src="${safeUrl}" alt="" class="cmp-logo" style="height:${height}px" />`;
 }
@@ -859,7 +771,7 @@ export function renderCookieCount(config: SiteConfig, t: TranslationStrings): st
     return '';
   }
   const text = interpolate(t.cookieCount, { count: String(count) });
-  return `<span class="cmp-cookie-count">${text}</span>`;
+  return `<span class="cmp-cookie-count">${escapeHtml(text)}</span>`;
 }
 
 /**
@@ -1090,11 +1002,23 @@ export function showPreferencesButton(config: SiteConfig, t: TranslationStrings)
   host.id = _PREFERENCES_BUTTON_ID;
   const shadow = host.attachShadow({ mode: 'open' });
 
-  const label =
-    t.managePreferences || 'Cookie preferences';
+  const label = escapeHtml(t.managePreferences || 'Cookie preferences');
 
   shadow.innerHTML = `
-    <style>
+    <style></style>
+    <button type="button" aria-label="${label}" title="${label}">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="10"/>
+        <path d="M8.5 8.5v.01"/>
+        <path d="M16 15.5v.01"/>
+        <path d="M12 12v.01"/>
+        <path d="M11 17v.01"/>
+        <path d="M7 14v.01"/>
+      </svg>
+      <span>${label}</span>
+    </button>
+  `;
+  (shadow.querySelector('style') as HTMLStyleElement).textContent = `
       :host {
         position: fixed;
         bottom: 20px;
@@ -1124,18 +1048,6 @@ export function showPreferencesButton(config: SiteConfig, t: TranslationStrings)
         button { transition: transform 0.15s ease; }
         button:hover { transform: translateY(-1px); }
       }
-    </style>
-    <button type="button" aria-label="${label}" title="${label}">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-        <circle cx="12" cy="12" r="10"/>
-        <path d="M8.5 8.5v.01"/>
-        <path d="M16 15.5v.01"/>
-        <path d="M12 12v.01"/>
-        <path d="M11 17v.01"/>
-        <path d="M7 14v.01"/>
-      </svg>
-      <span>${label}</span>
-    </button>
   `;
 
   const btn = shadow.querySelector('button') as HTMLButtonElement;
@@ -1151,7 +1063,7 @@ export function showPreferencesButton(config: SiteConfig, t: TranslationStrings)
 /** Resolve position CSS for the banner based on display mode. */
 function getPositionCss(bc: BannerConfig | null): string {
   const mode = bc?.displayMode ?? 'bottom_banner';
-  const radius = bc?.borderRadius ?? 6;
+  const radius = pixelsOr(bc?.borderRadius, 6);
   const cornerPos = bc?.cornerPosition ?? 'right';
   const width = clampBannerWidth(bc?.bannerWidth);
 
@@ -1178,6 +1090,16 @@ function clampBannerWidth(width: number | undefined): number {
   return Math.min(960, Math.max(280, Math.round(width)));
 }
 
+/** Use ``value`` when it is a valid colour, otherwise ``fallback``. */
+function colourOr(value: unknown, fallback: string): string {
+  return isValidColour(value) ? value.trim() : fallback;
+}
+
+/** Use ``value`` when it is a finite, non-negative number, otherwise ``fallback``. */
+function pixelsOr(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : fallback;
+}
+
 /** Resolve per-button inline style from ButtonConfig. */
 function getButtonCss(
   btnCfg: ButtonConfig | undefined,
@@ -1189,9 +1111,9 @@ function getButtonCss(
   const style = btnCfg?.style;
   const bg = style === 'text' || style === 'outline'
     ? 'transparent'
-    : btnCfg?.backgroundColour ?? fallbackBg;
-  const color = btnCfg?.textColour ?? fallbackColor;
-  const border = btnCfg?.borderColour
+    : colourOr(btnCfg?.backgroundColour, fallbackBg);
+  const color = colourOr(btnCfg?.textColour, fallbackColor);
+  const border = isValidColour(btnCfg?.borderColour)
     ? `1px solid ${btnCfg.borderColour}`
     : style === 'outline'
       ? `1px solid ${color}`
@@ -1205,11 +1127,13 @@ function getButtonCss(
 /** Banner CSS — isolated inside Shadow DOM. Exported for unit testing only. */
 export function getBannerStyles(config: SiteConfig): string {
   const bc = config.banner_config;
-  const bg = bc?.backgroundColour ?? '#ffffff';
-  const text = bc?.textColour ?? '#0E1929';        // ConsentOS Ink
-  const primary = bc?.primaryColour ?? '#2C6AE4';  // ConsentOS Action Blue
-  const font = bc?.fontFamily ?? '-apple-system, BlinkMacSystemFont, \'Segoe UI\', Roboto, sans-serif';
-  const radius = bc?.borderRadius ?? 6;
+  const bg = colourOr(bc?.backgroundColour, '#ffffff');
+  const text = colourOr(bc?.textColour, '#0E1929');        // ConsentOS Ink
+  const primary = colourOr(bc?.primaryColour, '#2C6AE4');  // ConsentOS Action Blue
+  const font = isValidFontFamily(bc?.fontFamily)
+    ? bc.fontFamily
+    : '-apple-system, BlinkMacSystemFont, \'Segoe UI\', Roboto, sans-serif';
+  const radius = pixelsOr(bc?.borderRadius, 6);
   const mode = bc?.displayMode ?? 'bottom_banner';
 
   const acceptCss = getButtonCss(bc?.acceptButton, primary, '#ffffff', 'none', radius);
