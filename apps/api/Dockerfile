@@ -30,6 +30,9 @@ WORKDIR /app
 # Copy installed dependencies from builder
 COPY --from=builder /install /usr/local
 
+# Verify the Redis transport in the runtime image before deployment.
+RUN python -c "from kombu.transport.redis import Transport"
+
 # Copy application code
 COPY . .
 

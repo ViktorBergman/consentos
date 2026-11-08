@@ -18,6 +18,8 @@ dependencies = [
     "bcrypt>=4.0,<5",
     "redis>=5.0,<6",
     "celery>=5.4,<6",
+    # Kombu's Redis transport imports packaging at worker startup.
+    "packaging>=24,<27",
     "httpx>=0.28,<1",
     "structlog>=24.0,<25",
     "psycopg2-binary>=2.9,<3",
