@@ -31,6 +31,7 @@ services:
     environment:
       CONSENTOS_DEPLOYMENT: docker-compose
       REDIS_URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@consentos-redis:6379/0"
+      SCANNER_SERVICE_URL: "http://consentos-scanner:8001"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -67,6 +68,7 @@ services:
     environment:
       CONSENTOS_DEPLOYMENT: docker-compose
       REDIS_URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@consentos-redis:6379/0"
+      SCANNER_SERVICE_URL: "http://consentos-scanner:8001"
     working_dir: /app
     command: >
       celery -A src.celery_app worker
