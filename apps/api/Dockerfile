@@ -8,7 +8,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml .
-RUN pip install --no-cache-dir --prefix=/install .
+COPY docker-constraints.txt .
+RUN pip install --no-cache-dir --prefix=/install --constraint docker-constraints.txt .
 
 # ── Runtime stage ────────────────────────────────────────────────────
 FROM python:3.12-slim
@@ -31,7 +32,7 @@ WORKDIR /app
 COPY --from=builder /install /usr/local
 
 # Verify the Redis transport in the runtime image before deployment.
-RUN python -c "from kombu.transport.redis import Transport"
+RUN python -c "from kombu.transport.redis import Channel; Channel._get_client(type('Check', (), {'global_keyprefix': ''})())"
 
 # Copy application code
 COPY . .

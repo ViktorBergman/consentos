@@ -1,0 +1,7 @@
+# Keep the worker's Redis stack at the versions recorded in uv.lock.
+# The rest of uv.lock predates the current project metadata, so constrain
+# this stack without replacing the application's dependency declarations.
+celery==5.6.2
+kombu==5.6.2
+redis==5.3.1
+packaging==26.0
