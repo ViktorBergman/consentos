@@ -7,7 +7,7 @@ services:
     container_name: consentos-bootstrap
     env_file: .env
     environment:
-      REDIS_URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0"
+      REDIS_URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@consentos-redis:6379/0"
     working_dir: /app
     command:
       - "sh"
@@ -30,7 +30,7 @@ services:
     env_file: .env
     environment:
       CONSENTOS_DEPLOYMENT: docker-compose
-      REDIS_URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0"
+      REDIS_URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@consentos-redis:6379/0"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -54,7 +54,7 @@ services:
     depends_on:
       consentos-bootstrap:
         condition: service_completed_successfully
-      redis:
+      consentos-redis:
         condition: service_healthy
 
   # ── Celery worker ────────────────────────────────────────────────
@@ -66,7 +66,7 @@ services:
     env_file: .env
     environment:
       CONSENTOS_DEPLOYMENT: docker-compose
-      REDIS_URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0"
+      REDIS_URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@consentos-redis:6379/0"
     working_dir: /app
     command: >
       celery -A src.celery_app worker
@@ -87,7 +87,7 @@ services:
         condition: service_completed_successfully
       consentos-scanner:
         condition: service_healthy
-      redis:
+      consentos-redis:
         condition: service_healthy
     deploy:
       resources:
@@ -103,7 +103,7 @@ services:
     env_file: .env
     environment:
       CONSENTOS_DEPLOYMENT: docker-compose
-      REDIS_URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379/0"
+      REDIS_URL: "redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@consentos-redis:6379/0"
     working_dir: /app
     command: >
       celery -A src.celery_app beat
@@ -117,7 +117,7 @@ services:
     depends_on:
       consentos-bootstrap:
         condition: service_completed_successfully
-      redis:
+      consentos-redis:
         condition: service_healthy
     deploy:
       resources:
@@ -171,7 +171,8 @@ services:
           memory: 128M
 
   # ── Redis ────────────────────────────────────────────────────────
-  redis:
+  # Avoid the generic "redis" DNS alias shared by other Coolify stacks.
+  consentos-redis:
     image: redis:7-alpine
     container_name: consentos-redis
     environment:
